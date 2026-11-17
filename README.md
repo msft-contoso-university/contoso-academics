@@ -175,8 +175,14 @@ permission. This covers unmerged bootstrap code: GitHub default setup cannot
 select languages absent from the default branch. Native default setup remains
 configured separately and must be checked again after source reaches `main`;
 candidate SARIF is not evidence of registered code-scanning alerts.
-The SHA-named candidate includes API files, contract, migration SQL, commit/run
-metadata and SHA-256 checksums. On PRs the tested SHA can be a synthetic merge
+The artifact `untrusted-candidate-${github.sha}-${github.run_id}-${github.run_attempt}`
+contains `contoso-academics-<source-sha>.zip`, `candidate.json` and `SHA256SUMS`.
+The ZIP has root-level `Contoso.Academics.dll`, `sql/academics.sql`, `contracts/`
+and an embedded manifest identical to the external one. Per-file hashes exclude
+the manifest itself; the outer ZIP hash binds it. Packaging wraps already-built
+output without rebuilding and refuses dirty source or private build paths.
+Artifact identity/run/attempt must come from GitHub provenance; self-reported
+checksums are not independent approval. On PRs the tested SHA can be a synthetic merge
 commit; it must not be confused with approval of the contributor's head commit.
 
 **Candidate != approved/trusted release.** Candidate packaging runs independently

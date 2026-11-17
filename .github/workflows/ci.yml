@@ -95,7 +95,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
-          name: nuget-audit-${{ github.sha }}
+          name: nuget-audit-${{ github.sha }}-${{ github.run_attempt }}
           path: artifacts/audit
           if-no-files-found: error
           retention-days: 7
@@ -160,7 +160,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
-          name: codeql-candidate-${{ github.sha }}
+          name: codeql-candidate-${{ github.sha }}-${{ github.run_attempt }}
           path: artifacts/codeql
           if-no-files-found: error
           retention-days: 7
@@ -244,7 +244,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
-          name: sql-test-evidence-${{ github.sha }}
+          name: sql-test-evidence-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             artifacts/test-results
             artifacts/contract-samples
@@ -272,32 +272,16 @@ jobs:
       - run: dotnet restore "$API_PROJECT" --locked-mode
       - run: dotnet tool restore --tool-manifest dotnet-tools.json
       - run: dotnet build "$API_PROJECT" --configuration Release --no-restore
-      - run: dotnet publish "$API_PROJECT" --configuration Release --no-build --no-restore --output artifacts/candidate/api
+      - run: dotnet publish "$API_PROJECT" --configuration Release --no-build --no-restore --output artifacts/publish
       - name: Generate idempotent SQL Server migration script without connecting to a database
         run: |
-          mkdir -p artifacts/candidate/sql
+          mkdir -p artifacts/publish/sql
           dotnet ef migrations script --idempotent --project "$API_PROJECT" \
-            --configuration Release --no-build --output artifacts/candidate/sql/academics.sql
+            --configuration Release --no-build --output artifacts/publish/sql/academics.sql
       - name: Bind candidate contents and checksums to the exact tested commit
-        shell: python
         run: |
-          import hashlib, json, os, pathlib, shutil, subprocess
-          root = pathlib.Path("artifacts/candidate")
-          sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-          if sha != os.environ["GITHUB_SHA"]:
-              raise SystemExit("Checkout SHA does not match workflow SHA")
-          shutil.copytree("contracts", root / "contracts")
-          metadata = {
-              "status": "UNTRUSTED CANDIDATE - NOT AN APPROVED RELEASE",
-              "repository": os.environ["GITHUB_REPOSITORY"], "commit": sha,
-              "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-              "event": os.environ["GITHUB_EVENT_NAME"],
-              "promotion": "Platform-owned; requires exact reviewed commit and immutable package/image. Never floating main.",
-          }
-          (root / "candidate.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-          files = sorted(path for path in root.rglob("*") if path.is_file())
-          checksums = {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
-          (root / "checksums.json").write_text(json.dumps(checksums, indent=2) + "\n", encoding="utf-8")
+          python -m unittest discover -s tools -p 'test_package_candidate.py'
+          python tools/package_candidate.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: untrusted-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}

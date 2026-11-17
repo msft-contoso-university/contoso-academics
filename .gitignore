@@ -4,5 +4,6 @@
 .vs/
 .env
 artifacts/
+__pycache__/
 .azure/*/
 !.azure/deployment-plan.md
