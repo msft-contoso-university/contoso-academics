@@ -12,20 +12,17 @@ metadata (not a fake authentication handler). The latest owner-reported local
 run passed 23 tests; format checks and publish also passed. SQLite
 `EnsureCreated` is **not** SQL Server/Azure evidence.
 
-Candidate CI is defined for Ubuntu 24.04 with a disposable SQL Server 2022
-loopback container, actual EF migrations and actual HTTP response samples.
-The workflow pins the official SQL Server image to
-`mcr.microsoft.com/mssql/server@sha256:e10cd49443c94dbdcb7a050987db22ff4d8c87052ac53768abe1ed848d3fcef6`;
-the integration owner verified its manifest/config hashes and linux/amd64
-platform against public MCR metadata. The locally generated SQL migration
-artifact contains four tables, but this is not evidence of SQL execution.
-Local isolated Python dependency installation hit a `files.pythonhosted.org`
-TLS handshake failure; no insecure workaround was used. Complete OpenAPI,
-actual-response contract and real SQL validation remain pending hosted CI.
+[Hosted candidate CI](https://github.com/msft-contoso-university/contoso-academics/actions/runs/44143517914)
+passed at commit `50757714b48a29198d9664aa7c2a2a8db4b9192c`, including actual SQL
+Server migrations, relational HTTP/JWT tests, actual-response contract validation,
+OpenAPI validation, locked restore/style, vulnerability auditing and portable
+candidate packaging. SQL runs in a disposable loopback-only container pinned to
+the stored OCI manifest
+`mcr.microsoft.com/mssql/server@sha256:4525e3efac9f3e241cb003bb2ff2a82818b502f37e12049d788b1a9fa7e13b7f`.
 
-Real SQL CI success, Azure SQL/Entra/AppInsights integration and platform
-deployment evidence remain pending. No claim of production or trace readiness
-is made. There is no component-owned Azure stack or deployment workflow.
+Azure SQL/Entra/AppInsights integration and platform deployment remain unverified.
+There is no component-owned Azure stack or deployment workflow. A successful
+candidate run is not human acceptance, independent review or release approval.
 
 ## API contract
 
@@ -161,6 +158,13 @@ Pushes (including bootstrap branches), specified PR events and manual dispatch
 run all relevant jobs without path filters. Checks cover locked restore,
 whitespace/style, NuGet audit (findings and errors fail), contract validation,
 SQL HTTP/JWT/actual-response tests, build/publish and an idempotent SQL script.
+Candidate CodeQL analyzes C#, Python and Actions with the extended security
+suite; missing analysis or any finding fails the aggregate gate. SARIF is
+retained as candidate evidence without alert upload or security-events write
+permission. This covers unmerged bootstrap code: GitHub default setup cannot
+select languages absent from the default branch. Native default setup remains
+configured separately and must be checked again after source reaches `main`;
+candidate SARIF is not evidence of registered code-scanning alerts.
 The SHA-named candidate includes API files, contract, migration SQL, commit/run
 metadata and SHA-256 checksums. On PRs the tested SHA can be a synthetic merge
 commit; it must not be confused with approval of the contributor's head commit.
