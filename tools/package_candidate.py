@@ -35,7 +35,7 @@ def main():
     for path in files:
         content = path.read_bytes()
         if any(form in content for form in private_paths):
-            raise ValueError("Published output embeds a private build path")
+            raise ValueError(f"{path.relative_to(publish).as_posix()} embeds a private build path")
     metadata = {
         "status": "UNTRUSTED CANDIDATE - NOT AN APPROVED RELEASE",
         "service": "contoso-academics",
