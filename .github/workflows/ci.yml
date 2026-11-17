@@ -21,7 +21,7 @@ env:
   TEST_PROJECT: tests/Contoso.Academics.Tests/Contoso.Academics.Tests.csproj
   API_PROJECT: src/Contoso.Academics/Contoso.Academics.csproj
   # SQL Server 2022 Linux AMD64; registry manifest and config hashes verified.
-  SQL_IMAGE: mcr.microsoft.com/mssql/server@sha256:e10cd49443c94dbdcb7a050987db22ff4d8c87052ac53768abe1ed848d3fcef6
+  SQL_IMAGE: mcr.microsoft.com/mssql/server@sha256:4525e3efac9f3e241cb003bb2ff2a82818b502f37e12049d788b1a9fa7e13b7f
 
 jobs:
   story:
@@ -69,23 +69,26 @@ jobs:
         shell: python
         run: |
           import json, os, pathlib, subprocess
-          result = subprocess.run(
-              ["dotnet", "list", os.environ["TEST_PROJECT"], "package", "--vulnerable",
-               "--include-transitive", "--format", "json", "--no-restore"],
-              text=True, capture_output=True)
-          print(result.stdout)
-          print(result.stderr)
           pathlib.Path("artifacts/audit").mkdir(parents=True, exist_ok=True)
-          pathlib.Path("artifacts/audit/nuget.json").write_text(result.stdout, encoding="utf-8")
-          if result.returncode or result.stderr.strip():
-              raise SystemExit("NuGet audit command failed or emitted diagnostics")
-          report = json.loads(result.stdout)
-          if report.get("version") != 1 or not report.get("projects") or report.get("logs"):
-              raise SystemExit("Missing/unsupported audit report or audit diagnostics")
-          for project in report["projects"]:
-              if not project.get("frameworks"):
-                  raise SystemExit("Audit project has no framework results")
-              for framework in project["frameworks"]:
+          for target in ("API_PROJECT", "TEST_PROJECT"):
+              result = subprocess.run(
+                  ["dotnet", "package", "list", "--project", os.environ[target], "--vulnerable",
+                   "--include-transitive", "--format", "json", "--no-restore"],
+                  text=True, capture_output=True)
+              print(result.stdout)
+              print(result.stderr)
+              pathlib.Path(f"artifacts/audit/{target}.json").write_text(result.stdout, encoding="utf-8")
+              if result.returncode or result.stderr.strip():
+                  raise SystemExit("NuGet audit command failed or emitted diagnostics")
+              report = json.loads(result.stdout)
+              projects = report.get("projects", [])
+              if report.get("version") != 1 or len(projects) != 1 or report.get("logs"):
+                  raise SystemExit("Missing/unsupported audit report or audit diagnostics")
+              if pathlib.Path(projects[0]["path"]).resolve() != pathlib.Path(os.environ[target]).resolve():
+                  raise SystemExit("NuGet audited an unexpected project")
+              # A successful --vulnerable report omits frameworks when there are no matches.
+              # The preceding audited restore still fails on unavailable feeds or findings.
+              for framework in projects[0].get("frameworks", []):
                   for group in ("topLevelPackages", "transitivePackages"):
                       if framework.get(group):
                           raise SystemExit("Vulnerable packages reported")
