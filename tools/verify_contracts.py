@@ -13,7 +13,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED_SAMPLES = {"Instructor", "Department", "Course", "InstructorPage"}
+REQUIRED_SAMPLES = {"Instructor", "Department", "Course", "InstructorPage", "DepartmentPage", "CoursePage"}
 LOCAL_REF = re.compile(r"#/components/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+\Z")
 
 

@@ -222,6 +222,12 @@ jobs:
       - name: Validate every actual response sample and required sample coverage
         if: ${{ !cancelled() }}
         run: '"$RUNNER_TEMP/academics-contracts/bin/python" tools/verify_contracts.py --samples "$ACADEMICS_CONTRACT_SAMPLES_DIRECTORY"'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: producer-response-samples-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/contract-samples
+          if-no-files-found: error
+          retention-days: 7
       - name: Failure diagnostics (no environment/connection dumps)
         if: failure()
         run: |

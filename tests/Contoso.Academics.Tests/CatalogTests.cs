@@ -164,6 +164,21 @@ public sealed class CatalogTests
         Assert.AreEqual(instructor.Id, department.Instructor?.Id);
         Assert.AreEqual(department.Name, course.Department.Name);
         Assert.AreEqual(250000.25m, department.Budget);
+        foreach (var (resource, schema) in new[]
+        {
+            ("courses", "CoursePage"), ("departments", "DepartmentPage"), ("instructors", "InstructorPage")
+        })
+        {
+            using var response = await client.GetAsync($"/api/v1/{resource}");
+            response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync();
+            using var page = JsonDocument.Parse(json);
+            Assert.AreEqual(1, page.RootElement.GetProperty(resource).GetArrayLength());
+            Assert.AreEqual(1, page.RootElement.GetProperty("count").GetInt32());
+            Assert.AreEqual(1, page.RootElement.GetProperty("pages").GetInt32());
+            Assert.AreEqual(1, page.RootElement.GetProperty("currentPage").GetInt32());
+            await ExportResponse(schema, json);
+        }
         using var instructorConflict = await client.DeleteAsync($"/api/v1/instructors/{instructor.Id}");
         using var departmentConflict = await client.DeleteAsync($"/api/v1/departments/{department.Id}");
         Assert.AreEqual(HttpStatusCode.Conflict, instructorConflict.StatusCode);

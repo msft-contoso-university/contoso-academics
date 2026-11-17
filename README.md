@@ -148,8 +148,11 @@ python -m venv .venv-contracts
 
 Sample envelopes are `{"schema":"Instructor","body":{...}}`. The verifier rejects
 remote/unresolved references, validates every sample with Draft 2020-12 and
-format checking, and requires Instructor, Department, Course and InstructorPage
-categories. Missing directories, empty samples or missing categories fail.
+format checking, and requires Instructor, Department, Course and all three Page
+categories. Successful SQL CI uploads these actual HTTP bodies in
+`producer-response-samples-<tested-sha>-<run-attempt>` for consumer compatibility
+checks; these payloads are untrusted JSON evidence, never code to execute.
+Missing directories, empty samples or missing categories fail.
 Omitting `--samples` checks the document only, not runtime conformance.
 
 ## Candidate CI and governance
@@ -184,8 +187,11 @@ Risk and rollback. The latest `ready-for-agent` addition must be audited to a
 real User with current write+ access. No Academics story is accepted yet: PR
 failure until human acceptance is intentional, not something to bypass.
 
-Humans own acceptance, codeowner review and merge. Repository protection will be
-configured separately after actual candidate checks are known. Platform owns
+Humans own acceptance, codeowner review and merge. Native `main` protection now
+requires the GitHub Actions `Required checks` producer, an up-to-date branch,
+independent last-push/codeowner approval, stale-review dismissal and resolved
+conversations, including for administrators; force pushes and deletion are off.
+Platform owns
 promotion/deployment using the **exact reviewed commit and immutable
 package/image**, never floating `main`. Roll back only to a known compatible
 immutable release after reviewing database/data compatibility.
