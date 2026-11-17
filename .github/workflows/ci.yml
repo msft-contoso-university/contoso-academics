@@ -1,0 +1,315 @@
+name: Candidate CI
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  TEST_PROJECT: tests/Contoso.Academics.Tests/Contoso.Academics.Tests.csproj
+  API_PROJECT: src/Contoso.Academics/Contoso.Academics.csproj
+  # SQL Server 2022 Linux AMD64; registry manifest and config hashes verified.
+  SQL_IMAGE: mcr.microsoft.com/mssql/server@sha256:4525e3efac9f3e241cb003bb2ff2a82818b502f37e12049d788b1a9fa7e13b7f
+
+jobs:
+  story:
+    name: Story intent
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: msft-contoso-university/contoso-engineering/.github/actions/story-gate@177851bad37f10f6b68c8d864e470ee743288e59
+        with:
+          github-token: ${{ github.token }}
+
+  style:
+    name: Locked restore and style
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.404
+      - run: dotnet restore "$TEST_PROJECT" --locked-mode
+      - name: Verify whitespace
+        run: dotnet format whitespace "$TEST_PROJECT" --verify-no-changes --no-restore
+      - name: Verify style
+        if: ${{ !cancelled() }}
+        run: dotnet format style "$TEST_PROJECT" --verify-no-changes --no-restore
+
+  audit:
+    name: NuGet vulnerability audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.404
+      - run: dotnet restore "$TEST_PROJECT" --locked-mode -p:NuGetAudit=true -p:NuGetAuditMode=all -p:NuGetAuditLevel=low
+      - name: Fail on audit findings, warnings, errors or malformed report
+        if: ${{ !cancelled() }}
+        shell: python
+        run: |
+          import json, os, pathlib, subprocess
+          pathlib.Path("artifacts/audit").mkdir(parents=True, exist_ok=True)
+          for target in ("API_PROJECT", "TEST_PROJECT"):
+              result = subprocess.run(
+                  ["dotnet", "package", "list", "--project", os.environ[target], "--vulnerable",
+                   "--include-transitive", "--format", "json", "--no-restore"],
+                  text=True, capture_output=True)
+              print(result.stdout)
+              print(result.stderr)
+              pathlib.Path(f"artifacts/audit/{target}.json").write_text(result.stdout, encoding="utf-8")
+              if result.returncode or result.stderr.strip():
+                  raise SystemExit("NuGet audit command failed or emitted diagnostics")
+              report = json.loads(result.stdout)
+              projects = report.get("projects", [])
+              if report.get("version") != 1 or len(projects) != 1 or report.get("logs"):
+                  raise SystemExit("Missing/unsupported audit report or audit diagnostics")
+              if pathlib.Path(projects[0]["path"]).resolve() != pathlib.Path(os.environ[target]).resolve():
+                  raise SystemExit("NuGet audited an unexpected project")
+              # A successful --vulnerable report omits frameworks when there are no matches.
+              # The preceding audited restore still fails on unavailable feeds or findings.
+              for framework in projects[0].get("frameworks", []):
+                  for group in ("topLevelPackages", "transitivePackages"):
+                      if framework.get(group):
+                          raise SystemExit("Vulnerable packages reported")
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: nuget-audit-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/audit
+          if-no-files-found: error
+          retention-days: 7
+
+  contracts:
+    name: Contract document
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m venv "$RUNNER_TEMP/academics-contracts"
+          "$RUNNER_TEMP/academics-contracts/bin/python" -m pip install -r requirements-contracts.txt
+          "$RUNNER_TEMP/academics-contracts/bin/python" -m pip check
+          "$RUNNER_TEMP/academics-contracts/bin/python" tools/verify_contracts.py
+
+  codeql:
+    name: Candidate CodeQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+        with:
+          languages: csharp,python,actions
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
+        with:
+          upload: false
+          output: artifacts/codeql
+      - name: Require complete analysis and no candidate security findings
+        shell: python
+        run: |
+          import json, pathlib
+          files = list(pathlib.Path("artifacts/codeql").glob("*.sarif"))
+          if {path.stem for path in files} != {"csharp", "python", "actions"}:
+              raise SystemExit("Missing or unexpected CodeQL language evidence")
+          for path in files:
+              report = json.loads(path.read_text(encoding="utf-8"))
+              runs = report.get("runs", [])
+              if report.get("version") != "2.1.0" or not runs:
+                  raise SystemExit(f"Invalid SARIF: {path.name}")
+              for run in runs:
+                  if run.get("tool", {}).get("driver", {}).get("name") != "CodeQL":
+                      raise SystemExit("Unexpected analysis tool")
+                  if run.get("results"):
+                      raise SystemExit(f"Security findings require review/remediation: {path.name}")
+                  for invocation in run.get("invocations", []):
+                      if invocation.get("executionSuccessful") is False:
+                          raise SystemExit(f"Incomplete analysis: {path.name}")
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: codeql-candidate-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/codeql
+          if-no-files-found: error
+          retention-days: 7
+
+  sql-tests:
+    name: SQL HTTP auth and response contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SQL_CONTAINER: academics-sql-${{ github.run_id }}-${{ github.run_attempt }}
+      ACADEMICS_CONTRACT_SAMPLES_DIRECTORY: ${{ github.workspace }}/artifacts/contract-samples
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.404
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: dotnet restore "$TEST_PROJECT" --locked-mode
+      - name: Prepare isolated contract verifier
+        run: |
+          python -m venv "$RUNNER_TEMP/academics-contracts"
+          "$RUNNER_TEMP/academics-contracts/bin/python" -m pip install -r requirements-contracts.txt
+          "$RUNNER_TEMP/academics-contracts/bin/python" -m pip check
+      - name: Require reviewed SQL image pin and create ephemeral credentials
+        shell: python
+        run: |
+          import os, re, secrets
+          if not re.fullmatch(r"mcr\.microsoft\.com/mssql/server@sha256:[0-9a-f]{64}", os.environ["SQL_IMAGE"]):
+              raise SystemExit("BLOCKED: a publicly verified SQL Server 2022 MCR digest must be pinned in ci.yml")
+          password = "Aa1!" + secrets.token_hex(30)
+          print(f"::add-mask::{password}")
+          connection = ("Server=127.0.0.1,1433;Initial Catalog=master;User ID=sa;"
+                        f"Password={password};Encrypt=true;TrustServerCertificate=true;Connect Timeout=5")
+          print(f"::add-mask::{connection}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"MSSQL_SA_PASSWORD={password}\nACADEMICS_TEST_SQL_CONNECTION={connection}\n")
+      - name: Start exact disposable loopback SQL container and wait at most 180 seconds
+        run: |
+          docker pull "$SQL_IMAGE"
+          docker run --detach --name "$SQL_CONTAINER" --publish 127.0.0.1:1433:1433 \
+            --env ACCEPT_EULA=Y --env MSSQL_PID=Developer --env MSSQL_SA_PASSWORD "$SQL_IMAGE"
+          for attempt in $(seq 1 36); do
+            if timeout 4s docker exec --env SQLCMDPASSWORD="$MSSQL_SA_PASSWORD" "$SQL_CONTAINER" \
+              /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -l 3 -t 3 -b -Q "SELECT 1"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::SQL readiness timed out after bounded retries"
+          docker inspect --format '{{json .State}}' "$SQL_CONTAINER"
+          docker logs --tail 100 "$SQL_CONTAINER"
+          exit 1
+      - name: Run real SQL migrations, relational HTTP and signed JWT tests
+        run: dotnet test "$TEST_PROJECT" --configuration Release --no-restore --logger trx --results-directory artifacts/test-results
+      - name: Validate every actual response sample and required sample coverage
+        if: ${{ !cancelled() }}
+        run: '"$RUNNER_TEMP/academics-contracts/bin/python" tools/verify_contracts.py --samples "$ACADEMICS_CONTRACT_SAMPLES_DIRECTORY"'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: producer-response-samples-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/contract-samples
+          if-no-files-found: error
+          retention-days: 7
+      - name: Failure diagnostics (no environment/connection dumps)
+        if: failure()
+        run: |
+          if docker container inspect "$SQL_CONTAINER" --format '{{.Name}}'; then
+            docker inspect --format '{{json .State}}' "$SQL_CONTAINER"
+            docker logs --tail 100 "$SQL_CONTAINER"
+          fi
+      - name: Remove only this run's SQL container
+        if: always()
+        run: |
+          if docker container inspect "$SQL_CONTAINER" --format '{{.Name}}'; then
+            docker rm --force "$SQL_CONTAINER"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: sql-test-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            artifacts/test-results
+            artifacts/contract-samples
+          if-no-files-found: error
+          retention-days: 7
+
+  consumers:
+    needs: sql-tests
+    permissions:
+      contents: read
+      actions: read
+    uses: msft-contoso-university/contoso-engineering/.github/workflows/consumer-checks.yml@eb98dd06864557ab29afc0567664ad7f20055358
+
+  candidate:
+    name: Build candidate package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.404
+      - run: dotnet restore "$API_PROJECT" --locked-mode
+      - run: dotnet tool restore --tool-manifest dotnet-tools.json
+      - run: dotnet build "$API_PROJECT" --configuration Release --no-restore
+      - run: dotnet publish "$API_PROJECT" --configuration Release --no-build --no-restore --output artifacts/publish
+      - name: Generate idempotent SQL Server migration script without connecting to a database
+        run: |
+          mkdir -p artifacts/publish/sql
+          dotnet ef migrations script --idempotent --project "$API_PROJECT" \
+            --configuration Release --no-build --output artifacts/publish/sql/academics.sql
+      - name: Bind candidate contents and checksums to the exact tested commit
+        run: |
+          python -m unittest discover -s tools -p 'test_package_candidate.py'
+          python tools/package_candidate.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: untrusted-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/candidate
+          if-no-files-found: error
+          retention-days: 7
+
+  required:
+    name: Required checks
+    if: always()
+    needs: [story, style, audit, contracts, codeql, sql-tests, consumers, candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - name: Fail closed on every unexpected failure, cancellation or skip
+        shell: python
+        run: |
+          import json, os
+          results = json.loads(os.environ["RESULTS"])
+          expected = {"story", "style", "audit", "contracts", "codeql", "sql-tests", "consumers", "candidate"}
+          if set(results) != expected:
+              raise SystemExit("Unexpected prerequisite set")
+          for job, result in results.items():
+              allowed = {"success"}
+              if job == "story" and os.environ["GITHUB_EVENT_NAME"] in {"push", "workflow_dispatch"}:
+                  allowed = {"skipped"}
+              if result["result"] not in allowed:
+                  raise SystemExit(f"{job}: unexpected {result['result']}")
+          print("Candidate checks passed. This does not approve, trust, merge or deploy a release.")
