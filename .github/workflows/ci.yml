@@ -1,0 +1,267 @@
+name: Candidate CI
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  TEST_PROJECT: tests/Contoso.Academics.Tests/Contoso.Academics.Tests.csproj
+  API_PROJECT: src/Contoso.Academics/Contoso.Academics.csproj
+  # SQL Server 2022 Linux AMD64; registry manifest and config hashes verified.
+  SQL_IMAGE: mcr.microsoft.com/mssql/server@sha256:e10cd49443c94dbdcb7a050987db22ff4d8c87052ac53768abe1ed848d3fcef6
+
+jobs:
+  story:
+    name: Story intent
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: msft-contoso-university/contoso-engineering/.github/actions/story-gate@177851bad37f10f6b68c8d864e470ee743288e59
+        with:
+          github-token: ${{ github.token }}
+
+  style:
+    name: Locked restore and style
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.404
+      - run: dotnet restore "$TEST_PROJECT" --locked-mode
+      - name: Verify whitespace
+        run: dotnet format whitespace "$TEST_PROJECT" --verify-no-changes --no-restore
+      - name: Verify style
+        if: ${{ !cancelled() }}
+        run: dotnet format style "$TEST_PROJECT" --verify-no-changes --no-restore
+
+  audit:
+    name: NuGet vulnerability audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.404
+      - run: dotnet restore "$TEST_PROJECT" --locked-mode -p:NuGetAudit=true -p:NuGetAuditMode=all -p:NuGetAuditLevel=low
+      - name: Fail on audit findings, warnings, errors or malformed report
+        if: ${{ !cancelled() }}
+        shell: python
+        run: |
+          import json, os, pathlib, subprocess
+          result = subprocess.run(
+              ["dotnet", "list", os.environ["TEST_PROJECT"], "package", "--vulnerable",
+               "--include-transitive", "--format", "json", "--no-restore"],
+              text=True, capture_output=True)
+          print(result.stdout)
+          print(result.stderr)
+          pathlib.Path("artifacts/audit").mkdir(parents=True, exist_ok=True)
+          pathlib.Path("artifacts/audit/nuget.json").write_text(result.stdout, encoding="utf-8")
+          if result.returncode or result.stderr.strip():
+              raise SystemExit("NuGet audit command failed or emitted diagnostics")
+          report = json.loads(result.stdout)
+          if report.get("version") != 1 or not report.get("projects") or report.get("logs"):
+              raise SystemExit("Missing/unsupported audit report or audit diagnostics")
+          for project in report["projects"]:
+              if not project.get("frameworks"):
+                  raise SystemExit("Audit project has no framework results")
+              for framework in project["frameworks"]:
+                  for group in ("topLevelPackages", "transitivePackages"):
+                      if framework.get(group):
+                          raise SystemExit("Vulnerable packages reported")
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: nuget-audit-${{ github.sha }}
+          path: artifacts/audit
+          if-no-files-found: error
+          retention-days: 7
+
+  contracts:
+    name: Contract document
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m venv "$RUNNER_TEMP/academics-contracts"
+          "$RUNNER_TEMP/academics-contracts/bin/python" -m pip install -r requirements-contracts.txt
+          "$RUNNER_TEMP/academics-contracts/bin/python" -m pip check
+          "$RUNNER_TEMP/academics-contracts/bin/python" tools/verify_contracts.py
+
+  sql-tests:
+    name: SQL HTTP auth and response contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SQL_CONTAINER: academics-sql-${{ github.run_id }}-${{ github.run_attempt }}
+      ACADEMICS_CONTRACT_SAMPLES_DIRECTORY: ${{ github.workspace }}/artifacts/contract-samples
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.404
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: dotnet restore "$TEST_PROJECT" --locked-mode
+      - name: Prepare isolated contract verifier
+        run: |
+          python -m venv "$RUNNER_TEMP/academics-contracts"
+          "$RUNNER_TEMP/academics-contracts/bin/python" -m pip install -r requirements-contracts.txt
+          "$RUNNER_TEMP/academics-contracts/bin/python" -m pip check
+      - name: Require reviewed SQL image pin and create ephemeral credentials
+        shell: python
+        run: |
+          import os, re, secrets
+          if not re.fullmatch(r"mcr\.microsoft\.com/mssql/server@sha256:[0-9a-f]{64}", os.environ["SQL_IMAGE"]):
+              raise SystemExit("BLOCKED: a publicly verified SQL Server 2022 MCR digest must be pinned in ci.yml")
+          password = "Aa1!" + secrets.token_hex(30)
+          print(f"::add-mask::{password}")
+          connection = ("Server=127.0.0.1,1433;Initial Catalog=master;User ID=sa;"
+                        f"Password={password};Encrypt=true;TrustServerCertificate=true;Connect Timeout=5")
+          print(f"::add-mask::{connection}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"MSSQL_SA_PASSWORD={password}\nACADEMICS_TEST_SQL_CONNECTION={connection}\n")
+      - name: Start exact disposable loopback SQL container and wait at most 180 seconds
+        run: |
+          docker pull "$SQL_IMAGE"
+          docker run --detach --name "$SQL_CONTAINER" --publish 127.0.0.1:1433:1433 \
+            --env ACCEPT_EULA=Y --env MSSQL_PID=Developer --env MSSQL_SA_PASSWORD "$SQL_IMAGE"
+          for attempt in $(seq 1 36); do
+            if timeout 4s docker exec --env SQLCMDPASSWORD="$MSSQL_SA_PASSWORD" "$SQL_CONTAINER" \
+              /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -l 3 -t 3 -b -Q "SELECT 1"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::SQL readiness timed out after bounded retries"
+          docker inspect --format '{{json .State}}' "$SQL_CONTAINER"
+          docker logs --tail 100 "$SQL_CONTAINER"
+          exit 1
+      - name: Run real SQL migrations, relational HTTP and signed JWT tests
+        run: dotnet test "$TEST_PROJECT" --configuration Release --no-restore --logger trx --results-directory artifacts/test-results
+      - name: Validate every actual response sample and required sample coverage
+        if: ${{ !cancelled() }}
+        run: '"$RUNNER_TEMP/academics-contracts/bin/python" tools/verify_contracts.py --samples "$ACADEMICS_CONTRACT_SAMPLES_DIRECTORY"'
+      - name: Failure diagnostics (no environment/connection dumps)
+        if: failure()
+        run: |
+          if docker container inspect "$SQL_CONTAINER" --format '{{.Name}}'; then
+            docker inspect --format '{{json .State}}' "$SQL_CONTAINER"
+            docker logs --tail 100 "$SQL_CONTAINER"
+          fi
+      - name: Remove only this run's SQL container
+        if: always()
+        run: |
+          if docker container inspect "$SQL_CONTAINER" --format '{{.Name}}'; then
+            docker rm --force "$SQL_CONTAINER"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: sql-test-evidence-${{ github.sha }}
+          path: |
+            artifacts/test-results
+            artifacts/contract-samples
+          if-no-files-found: error
+          retention-days: 7
+
+  candidate:
+    name: Build candidate package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.404
+      - run: dotnet restore "$API_PROJECT" --locked-mode
+      - run: dotnet tool restore --tool-manifest dotnet-tools.json
+      - run: dotnet build "$API_PROJECT" --configuration Release --no-restore
+      - run: dotnet publish "$API_PROJECT" --configuration Release --no-build --no-restore --output artifacts/candidate/api
+      - name: Generate idempotent SQL Server migration script without connecting to a database
+        run: |
+          mkdir -p artifacts/candidate/sql
+          dotnet ef migrations script --idempotent --project "$API_PROJECT" \
+            --configuration Release --no-build --output artifacts/candidate/sql/academics.sql
+      - name: Bind candidate contents and checksums to the exact tested commit
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, shutil, subprocess
+          root = pathlib.Path("artifacts/candidate")
+          sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if sha != os.environ["GITHUB_SHA"]:
+              raise SystemExit("Checkout SHA does not match workflow SHA")
+          shutil.copytree("contracts", root / "contracts")
+          metadata = {
+              "status": "UNTRUSTED CANDIDATE - NOT AN APPROVED RELEASE",
+              "repository": os.environ["GITHUB_REPOSITORY"], "commit": sha,
+              "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "promotion": "Platform-owned; requires exact reviewed commit and immutable package/image. Never floating main.",
+          }
+          (root / "candidate.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+          files = sorted(path for path in root.rglob("*") if path.is_file())
+          checksums = {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
+          (root / "checksums.json").write_text(json.dumps(checksums, indent=2) + "\n", encoding="utf-8")
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: untrusted-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/candidate
+          if-no-files-found: error
+          retention-days: 7
+
+  required:
+    name: Required checks
+    if: always()
+    needs: [story, style, audit, contracts, sql-tests, candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - name: Fail closed on every unexpected failure, cancellation or skip
+        shell: python
+        run: |
+          import json, os
+          results = json.loads(os.environ["RESULTS"])
+          expected = {"story", "style", "audit", "contracts", "sql-tests", "candidate"}
+          if set(results) != expected:
+              raise SystemExit("Unexpected prerequisite set")
+          for job, result in results.items():
+              allowed = {"success"}
+              if job == "story" and os.environ["GITHUB_EVENT_NAME"] in {"push", "workflow_dispatch"}:
+                  allowed = {"skipped"}
+              if result["result"] not in allowed:
+                  raise SystemExit(f"{job}: unexpected {result['result']}")
+          print("Candidate checks passed. This does not approve, trust, merge or deploy a release.")
