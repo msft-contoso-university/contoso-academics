@@ -251,6 +251,13 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  consumers:
+    needs: sql-tests
+    permissions:
+      contents: read
+      actions: read
+    uses: msft-contoso-university/contoso-engineering/.github/workflows/consumer-checks.yml@eb98dd06864557ab29afc0567664ad7f20055358
+
   candidate:
     name: Build candidate package
     runs-on: ubuntu-24.04
@@ -301,7 +308,7 @@ jobs:
   required:
     name: Required checks
     if: always()
-    needs: [story, style, audit, contracts, codeql, sql-tests, candidate]
+    needs: [story, style, audit, contracts, codeql, sql-tests, consumers, candidate]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -312,7 +319,7 @@ jobs:
         run: |
           import json, os
           results = json.loads(os.environ["RESULTS"])
-          expected = {"story", "style", "audit", "contracts", "codeql", "sql-tests", "candidate"}
+          expected = {"story", "style", "audit", "contracts", "codeql", "sql-tests", "consumers", "candidate"}
           if set(results) != expected:
               raise SystemExit("Unexpected prerequisite set")
           for job, result in results.items():

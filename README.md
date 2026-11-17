@@ -155,6 +155,13 @@ checks; these payloads are untrusted JSON evidence, never code to execute.
 Missing directories, empty samples or missing categories fail.
 Omitting `--samples` checks the document only, not runtime conformance.
 
+After SQL tests pass, the pinned central consumer workflow runs the current
+immutable Web and Enrollments consumer candidates against these exact response
+artifacts. Missing samples, incompatible required fields and absent/skipped/
+failed compatibility tests fail `Required checks`. Jobs have only contents and
+Actions read access, inherit no secrets and perform no deployment. This verifies
+payload compatibility, not live service connectivity or Entra integration.
+
 ## Candidate CI and governance
 
 Pushes (including bootstrap branches), specified PR events and manual dispatch
